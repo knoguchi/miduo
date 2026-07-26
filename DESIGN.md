@@ -1,114 +1,122 @@
-# 汎用2声自動編曲システム 設計ドキュメント
+# General-Purpose Two-Voice Arranger: Design
 
-[English](DESIGN.en.md)
+[日本語](DESIGN.ja.md)
 
-この文書は、将来構想ではなく現在の実装を記述する。
+This document describes the current implementation rather than a future
+proposal.
 
-## 1. 目的とスコープ
+## 1. Purpose and scope
 
-MusicXML / MuseScore楽譜を入力し、原曲の音素材を2本の単旋律声部へ
-圧縮して出力する。
+The system accepts MusicXML or MuseScore input and reduces the source material
+to two monophonic voices.
 
-アーキテクチャは汎用2声を志向する。一方、現在の音域定数、出力楽器
-メタデータ、音部記号はヴァイオリン向けにハードコードされている。将来は
-声部ごとに楽器プロファイルを選択できる構造へ移行する。
+The architecture is intended to support general two-voice arrangement.
+However, the current range constants, output instrument metadata, and clef are
+hard-coded for violins. A future profile system is expected to select an
+instrument independently for each voice.
 
-基本方針は次のとおり。
+Its main goals are:
 
-- 第1声で主旋律をできるだけ保存する
-- 第2声で和声の特徴と持続音を保存する
-- 両声部を現在の設定音域内に収める
-- 第2声を、和声だけでなく旋律線としても滑らかにする
-- 高密度な伴奏リズムを演奏可能な密度へ縮約する
+- preserve the melody in the first voice;
+- preserve characteristic harmony and sustained tones in the second voice;
+- keep both voices within the currently configured ranges;
+- make the second voice work as a coherent melodic line as well as a harmonic
+  reduction; and
+- reduce dense accompaniment rhythms to a playable density.
 
-同一声部内の重音、楽器固有の奏法、強弱・アーティキュレーションの創作、
-原曲にない対旋律の作曲は現在のスコープ外である。
+Simultaneous notes within a voice, instrument-specific technique, newly
+invented dynamics or articulations, and newly composed countermelodies are
+outside the current scope.
 
-## 2. パイプライン
+## 2. Pipeline
 
 ```text
-[入力: MusicXML / MXL / MSCZ]
+[Input: MusicXML / MXL / MSCZ]
           |
           v
 [parse] MusicXML -> ScoreIR
           |
           v
-[slice] 音の開始・終了境界で和声スライス化
+[slice] Split at every note onset and release
           |
           v
-[harmony] internalまたはmusic21によるコード推定とカデンツ検出
+[harmony] Estimate chords and cadences with internal or music21 analysis
           |
           v
-[spans] 持続音・掛留音・ペダル音の検出
+[spans] Detect sustained notes, suspensions, and pedal tones
           |
           v
-[assign] 貪欲ベースライン + フレーズ単位ビームサーチ
+[assign] Greedy baseline + segment-level beam search
           |
           v
-[reduce] 第2声の高密度リズムを縮約
+[reduce] Reduce dense second-voice rhythms
           |
           v
-[validate] 音域・単声性・声部交差を検証し再探索
+[validate] Check range, monophony, and voice crossing; retry if needed
           |
           v
 [write] MusicXML / MXL / MSCZ
 ```
 
-実装モジュールは次のように分離されている。
+The implementation is divided into the following modules:
 
-| 段階 | モジュール |
+| Stage | Module |
 |---|---|
-| 入力検出・MXL展開 | `io.py` |
-| MuseScore変換 | `musescore.py` |
-| MusicXML解析 | `parser.py` |
-| データモデル | `model.py` |
-| スライス化 | `slicing.py` |
-| 和声推定 | `harmony.py` |
-| スパン検出 | `spans.py` |
-| 2声割当 | `assignment.py` |
-| リズム縮約 | `rhythm.py` |
-| 制約検証 | `validation.py` |
-| 出力 | `writer.py` |
-| パイプライン | `pipeline.py` |
+| Format detection and MXL extraction | `io.py` |
+| MuseScore conversion | `musescore.py` |
+| MusicXML parsing | `parser.py` |
+| Data model | `model.py` |
+| Harmonic slicing | `slicing.py` |
+| Harmony estimation | `harmony.py`, `music21_harmony.py` |
+| Sustain-span detection | `spans.py` |
+| Two-voice assignment | `assignment.py` |
+| Rhythm reduction | `rhythm.py` |
+| Constraint validation | `validation.py` |
+| Output generation | `writer.py` |
+| Pipeline facade | `pipeline.py` |
 | CLI | `cli.py` |
 
-## 3. 入出力
+## 3. Input and output
 
-### 3.1 入力
+### 3.1 Input
 
-対応拡張子は `.musicxml`、`.xml`、`.mxl`、`.mscz` である。
+Supported extensions are `.musicxml`, `.xml`, `.mxl`, and `.mscz`.
 
-- MusicXMLは直接解析する
-- MXLはZIPコンテナからrootfileを展開する
-- MSCZはMuseScore CLIで一時MusicXMLへ変換してから解析する
-- MuseScoreはPATH、macOSの標準的なアプリ配置、または `--musescore` で探す
-- 編曲パーサは `score-partwise` を要求する
+- MusicXML is parsed directly.
+- MXL is opened as a ZIP container and its rootfile is parsed.
+- MSCZ is converted to temporary MusicXML through the MuseScore CLI.
+- MuseScore is discovered through `PATH`, common macOS application locations,
+  or the `--musescore` option.
+- The arrangement parser requires `score-partwise` MusicXML.
 
-パーサはパート、声部、スタッフ、音高、開始位置、音価、タイ、拍子、調号、
-小節番号を読む。休符は時間軸の構築に使用するが `NoteEvent` にはしない。
-グレースノートは現在除外する。
+The parser reads parts, voices, staves, pitches, offsets, durations, ties, time
+signatures, key signatures, and measure numbers. Rests contribute to the
+timeline but do not become `NoteEvent` objects. Grace notes are ignored.
 
-時間は四分音符を1とする `Fraction` で保持する。非暗黙小節の時間軸は拍子の
-期待小節長を用い、アウフタクトなど `implicit="yes"` の小節は実際の使用長を
-用いる。
+Time uses exact `Fraction` values with one quarter note as the unit. A regular
+measure advances by the duration implied by its active time signature. A
+measure marked `implicit="yes"`, such as a pickup, advances by its actual used
+duration.
 
-### 3.2 出力
+### 3.2 Output
 
-2パートのMusicXML 4.0を生成し、各パートを単旋律、ト音記号、非移調として
-記述する。MXLはMusicXMLを標準コンテナへ格納する。MSCZは生成MusicXMLを
-MuseScore CLIで変換する。
+The writer creates a two-part MusicXML 4.0 score. Each part is monophonic,
+non-transposing, and written with a treble clef. MXL wraps the MusicXML in a
+standard container. MSCZ output is produced by converting the generated
+MusicXML with the MuseScore CLI.
 
-出力直前に開始位置と終了位置を四分音符の1/4、すなわち16分音符グリッドへ
-量子化する。これにより細かな分数音価や不完全小節警告を避け、MuseScoreで
-安定して開ける記譜を優先する。小節をまたぐ音はタイで分割し、空白区間は
-休符で充填する。
+Immediately before writing, note starts and ends are quantized to one quarter
+of a quarter note, producing a sixteenth-note grid. This favors readable,
+stable MuseScore notation over preservation of very small fractional
+durations. Notes crossing measure boundaries are split and tied, and empty
+regions are filled with rests.
 
-現状は原譜のレイアウト、歌詞、強弱、アーティキュレーション、スラーなどを
-引き継がず、拍子と調号から出力小節を再構築する。
+The current writer rebuilds measures from time and key signatures. It does not
+copy source layout, lyrics, dynamics, articulations, or slurs.
 
 ## 4. ScoreIR
 
-主要なデータ型は次のとおり。
+The main data structures are:
 
 ```text
 ScoreIR
@@ -155,31 +163,31 @@ AssignedNote
   cost_breakdown
 ```
 
-`origin` は `melody`、`tension_selection`、`bass_selection`、
-`span_continuation`、`rhythm_reduction` のいずれかである。
-`cost_breakdown` とともに、選択理由の追跡と重み調整に使用する。
+`origin` is one of `melody`, `tension_selection`, `bass_selection`,
+`span_continuation`, or `rhythm_reduction`. Together with `cost_breakdown`, it
+supports tracing decisions and tuning weights.
 
-## 5. 和声スライス
+## 5. Harmonic slices
 
-すべての音の開始位置と終了位置を境界として、曲全体を区間へ分割する。
-各スライスにはその区間で発音中の全 `NoteEvent` が含まれる。したがって、
-新しいアタックだけでなく音のリリースでも和声状態が更新される。
+The score is divided at every note onset and release. Each slice contains all
+`NoteEvent` objects sounding during that interval, so a release updates the
+harmonic state even when no new attack occurs.
 
-拍重要度は拍子内の位置から次の値を付ける。
+Metric weight is derived from the active time signature:
 
-- 拍頭: `1.0`
-- 拍の半分: `0.5`
-- その他: `0.25`
+- beat boundary: `1.0`;
+- half-beat boundary: `0.5`; and
+- other subdivisions: `0.25`.
 
-## 6. 和声推定
+## 6. Harmony estimation
 
-和声解析は `internal` と `music21` の2バックエンドを持つ。CLIでは
-`--harmony-backend` で選択し、既定は `internal` である。
+The analyzer has two backends, selected with `--harmony-backend`. The default
+is `internal`.
 
-### 6.1 internalバックエンド
+### 6.1 Internal backend
 
-各スライスの整数ピッチクラス集合を、12通りの根音と次のテンプレートへ
-総当たりで照合する。
+For each slice, the analyzer compares its integer pitch-class set against all
+twelve roots of these templates:
 
 - major: `{0, 4, 7}`
 - minor: `{0, 3, 7}`
@@ -190,153 +198,168 @@ AssignedNote
 - diminished seventh: `{0, 3, 6, 9}`
 - half-diminished seventh: `{0, 3, 6, 10}`
 
-候補の確信度は、観測音の被覆率、テンプレートの被覆率、ベースが根音である
-場合のボーナス、観測音数による証拠量から計算する。既定閾値は `0.65`。
-閾値未満では、直前の確信度が高いコードを保持し、現在のベースと低い確信度を
-引き継ぐ。
+Confidence combines observed-set coverage, template coverage, a root-position
+bass bonus, and the amount of pitch evidence. The default threshold is `0.65`.
+A low-confidence slice inherits the last confident chord while retaining the
+current bass and a reduced confidence value.
 
-テンプレート外の音程は `b9`、`9`、`#9`、`11`、`#11`、`b13`、`13`
-として記録する。
+Intervals outside the selected template are recorded as `b9`, `9`, `#9`,
+`11`, `#11`, `b13`, or `13`.
 
-カデンツは、確信度のある長三和音または属七から、完全4度上の長三和音または
-短三和音へ進む箇所をV-I型として検出する。この方式は調性を持たないため、
-文脈によってはI–IVもカデンツと判定する。
+The internal backend marks a cadence when a confident major or dominant-
+seventh chord moves up a perfect fourth to a major or minor chord. Because this
+backend has no key context, it can mistake a tonic-to-subdominant progression
+for a cadence.
 
-### 6.2 music21バックエンド
+### 6.2 music21 backend
 
-現在の和声スライスと厳密時間軸は維持し、各スライスの音をmusic21の
-`Chord`へ変換する。16四分音符ごとのコンテキストを `Stream.analyze("key")`
-で解析し、局所調性を推定する。局所解析の相関係数が低い場合は、MusicXMLの
-調号から得た長調・短調を優先する。
+The exact internal timeline and harmonic slices remain authoritative. Each
+slice is converted to a music21 `Chord`. The analyzer groups material into
+sixteen-quarter-note contexts and runs `Stream.analyze("key")` to estimate a
+local key. When local correlation is weak, it prefers a key derived from the
+notated MusicXML key signature.
 
-music21が長三和音、短三和音、増三和音、属七、長七、短七、減七、半減七の
-いずれかを明確に返した場合、そのルート・転回形と
-`romanNumeralFromChord()` のローマ数字を `ChordLabel`へ格納する。
-判別できない場合はinternal推定へフォールバックする。コードの確信度と
-低信頼区間の補間はinternalと共通である。
+When music21 clearly identifies one of the supported triad or seventh-chord
+qualities, its root and `romanNumeralFromChord()` result are stored in
+`ChordLabel`. Unsupported or ambiguous qualities fall back to the internal
+estimate. Confidence and low-confidence interpolation remain shared with the
+internal backend.
 
-カデンツはローマ数字上のV–Iを要求する。`V/x`から`x`への進行も二次的
-ドミナントの解決として扱うため、internalで起きるI–IVの誤検出を避けられる。
+A cadence requires a dominant-to-tonic Roman-numeral progression. A resolved
+secondary dominant, such as `V/x` moving to `x`, is also treated as a cadence.
+This avoids the internal backend's tonic-to-subdominant false positive.
 
-両バックエンドともMusicXMLの `<harmony>` と人手オーバーライドはまだ
-利用しない。
+Neither backend currently uses MusicXML `<harmony>` elements or manual chord
+overrides.
 
-## 7. 持続区間
+## 7. Sustain spans
 
-同一原声部・同一ピッチで切れ目なく続く音を連結する。タイがあるか、単独でも
-3拍以上続くものを候補とする。
+Consecutive notes with the same pitch and source voice are joined when no gap
+exists. A chain becomes a candidate when it contains a tie or when a single
+note lasts at least three quarter-note units.
 
-- 開始時はコードトーンで、その後非和声音になり、終了時に半音または全音で
-  解決するものを `suspension`
-- 四分音符8個分以上続き、多くの関連スライスで根音または5度となるものを
-  `pedal`
-- その他を `plain_sustain`
+- A candidate that begins as a chord tone, becomes a non-chord tone, and then
+  resolves by a semitone or whole tone is a `suspension`.
+- A candidate lasting at least eight quarter-note units and acting as the root
+  or fifth in most related slices is a `pedal`.
+- Other candidates are `plain_sustain`.
 
-声部探索では、現在のスライスで有効なスパンと同じ音を選ぶと継続ボーナスを
-与える。長大曲で全スパンを候補ごとに再走査しないよう、有効ピッチを
-スライスごとに一度だけ索引化する。
+Selecting an active span pitch during voice assignment receives a continuity
+bonus. Active span pitches are indexed once per slice so the search does not
+scan every span for every candidate path.
 
-## 8. 2声への圧縮
+## 8. Two-voice reduction
 
-### 8.1 主旋律
+### 8.1 Melody
 
-第1パートに属する最小IDの原声部を主旋律とみなす。主旋律が発音している
-スライスでは、その最高音を第1声へ割り当てる。音域外の場合に限り
-オクターブ移動候補を作る。
+The lowest-numbered source voice in the first part is treated as the melody.
+When that source voice is active, its highest pitch is assigned to the first
+output voice. Octave alternatives are generated only when the source pitch is
+outside the configured range.
 
-主旋律が休んでいる区間では第1声も休み、伴奏素材を第1声へ持ち上げない。
-その区間は第2声のみで原曲の骨格を受け持つ。
+When the melody source rests, the first output voice also rests. Accompaniment
+material is not promoted into it; the second output voice carries the source
+backbone alone.
 
-### 8.2 第2声の候補
+### 8.2 Second-voice candidates
 
-現在発音中の原曲音から第1声の音を除き、G3–A6に入るオクターブ移動を
-候補にする。これは現在ハードコードされている第2声音域である。休符も
-候補に含める。重複音高を除去した後、局所コスト上位最大8候補に枝刈りする。
-このとき貪欲ベースラインの候補は可能な限り残す。
+The source pitch selected for the first voice is removed from the currently
+sounding material. Octave transpositions of the remaining notes are generated
+within G3–A6, the currently hard-coded range for the second voice, and a rest
+is included as a choice. Duplicate pitches are removed. The choices are then
+locally ranked and pruned to at most eight, while retaining the
+greedy-baseline choice when possible.
 
-現在の範囲は、第1声がG3–E7、第2声がG3–A6である。`arrange` CLIからは
-変更できない。Python APIでは音域設定オブジェクトを差し替えられるが、
-汎用楽器プロファイルにはなっていない。
+The current range is G3–E7 for the first voice and G3–A6 for the second. These
+values cannot be changed through `arrange`. The Python API accepts a
+replacement range-settings object, but this has not yet been generalized into
+an instrument-profile abstraction.
 
-### 8.3 探索
+### 8.3 Search
 
-まず各スライスで局所的に最小コストを選び、貪欲ベースラインを作る。
-続いて第2声をフレーズ単位で再探索する。
+A greedy pass first chooses the lowest-cost pair at every slice. The second
+voice is then searched again within bounded segments.
 
-フレーズ境界は次のいずれかで置く。
+A segment ends when any of the following occurs:
 
-- 長さが8四分音符へ達した
-- カデンツへ達した
-- 次のスライスが無音
+- its duration reaches approximately eight quarter-note units;
+- the current slice is marked as a cadence; or
+- the next slice is silent.
 
-各時刻で休符を含む候補を最大8選択肢へ絞り、遷移コストを加えて経路を
-展開する。同じ状態へ到達した経路は最小コストの1本へ統合し、さらに
-累積コスト上位24経路だけを次の時刻へ残す。
+At each slice, the search expands at most eight choices including a rest. Paths
+that reach the same state retain only the lowest-cost representative, after
+which only the best 24 accumulated paths continue. The state contains the
+previous pitch, the pitch before it, and the most recent strong-beat anchor.
+These values carry across segment boundaries to reduce discontinuity.
 
-各区間の終端で最良経路を1本に確定する状態マージ付きビームサーチであり、
-曲全体の最適解は保証しない。
+At the end of each segment, the single best path is committed. This is a
+state-merging beam search and does not guarantee a globally optimal path.
 
-経路状態は直前音、その前の音、直近の強拍アンカーを持つ。フレーズ間でも
-これらを引き継ぎ、境界で旋律線が不連続になりにくくする。
+### 8.4 Cost function
 
-### 8.4 コスト関数
+Default weights are:
 
-既定重みは次のとおり。
-
-| 項 | 重み | 目的 |
+| Term | Weight | Purpose |
 |---|---:|---|
-| tension loss | 8.0 | 3度・7度などコード種別を表す音の欠落を抑える |
-| range violation | 100.0 | 実用音域外を強く抑える |
-| leap | 1.0 | 直前音からの距離の二乗を抑える |
-| cadence root | 4.0 | カデンツで根音または5度を残す |
-| voice crossing | 100.0 | 第2声が第1声を越えるのを抑える |
-| spacing | 2.0 | 同度・2度の衝突と2オクターブ超を抑える |
-| span continuity bonus | 2.0 | 持続音・掛留音・ペダル音を保つ |
-| large leap | 3.0 | 7半音を超える第2声の跳躍を追加抑制する |
-| direction change | 0.5 | 大きな折り返しを抑える |
-| weak-beat change | 1.5 | 弱拍での不要な音変更を抑える |
-| common-tone bonus | 0.6 | 共通音保持を促す |
-| structural leap | 6.0 | 強拍間の長距離移動を抑える |
+| tension loss | 8.0 | Preserve thirds, sevenths, and other quality-defining tones |
+| range violation | 100.0 | Strongly discourage pitches outside configured ranges |
+| leap | 1.0 | Penalize squared distance from the previous pitch |
+| cadence root | 4.0 | Preserve a root or fifth at a cadence |
+| voice crossing | 100.0 | Discourage the second voice from moving above the first |
+| spacing | 2.0 | Discourage unisons, seconds, and spacing beyond two octaves |
+| span continuity bonus | 2.0 | Preserve sustains, suspensions, and pedal tones |
+| large leap | 3.0 | Add a penalty for second-voice leaps greater than seven semitones |
+| direction change | 0.5 | Discourage large reversals of direction |
+| weak-beat change | 1.5 | Discourage unnecessary motion on weak metric positions |
+| common-tone bonus | 0.6 | Reward retaining a common tone |
+| structural leap | 6.0 | Discourage long-distance movement between strong beats |
 
-和声的な妥当性だけでなく、第2声を独立した旋律線として聴けることを
-目標にする。ただし候補は原曲音とそのオクターブ移動に限定される。
+The objective is a coherent second melodic line as well as a harmonically
+meaningful reduction. Candidates are restricted to source pitches and their
+octave transpositions.
 
-## 9. リズム簡略化
+## 9. Rhythm reduction
 
-第2声のアタックを拍ごとに集計する。既定では1拍に2アタックを超える場合、
-拍重要度が最大で、同点なら拍頭に近い1音だけを残す。残した音を拍末まで
-延長し、削除数と `rhythm_reduction` の由来を記録する。
+Second-voice attacks are grouped by beat. By default, a beat containing more
+than two attacks keeps only the attack with the greatest metric weight, using
+proximity to the beat boundary as the tie-breaker. The retained note is
+extended to the end of the beat. The number of removed attacks and the
+`rhythm_reduction` origin are recorded.
 
-第1声のリズムはこの段階では変更しない。
+The first-voice rhythm is not changed by this stage.
 
-## 10. バリデーション
+## 10. Validation
 
-最終割当について次をハード制約として検査する。
+The final assignment is checked for:
 
-- 第1声 / 第2声の音域
-- 各声部内の音の重なり
-- 第1声より第2声が高くなる声部交差
+- first- and second-voice range;
+- overlapping notes within either voice; and
+- the second voice crossing above the first.
 
-違反があれば、音域と声部交差の重みをリトライごとに10倍し、声部割当と
-リズム簡略化を再実行する。既定の最大回数は3回。さらに交差する第2声を
-音域内でオクターブ下降して修復する。結果には残存問題とリトライ回数を保持する。
+When violations remain, range and crossing weights are multiplied by ten on
+each retry, then assignment and rhythm reduction are rerun. The default retry
+limit is three. A final repair also lowers crossing second-voice notes by
+octaves while they remain in range. The result records remaining issues and
+the retry count.
 
-## 11. 進捗表示と性能
+## 11. Progress and performance
 
-`arrange` は入力、解析、スライス化、和声推定、スパン検出、声部割当、
-リズム簡略化、検証、書き出しの進捗を標準エラーへflushして表示する。
-声部割当ではフレーズが完了するごとに原譜の小節番号、処理済み小節数、
-百分率を表示する。`--quiet` で無効化できる。
+`arrange` flushes progress messages to standard error for input, parsing,
+slicing, harmony estimation, span detection, assignment, rhythm reduction,
+validation, and writing. After each search segment, assignment progress
+reports the source measure number, completed-measure count, and percentage.
+`--quiet` disables these messages.
 
-探索量は休符を含む候補8、ビーム幅24、最大でおおむね四分音符8個分の
-区間へ制限する。スパン判定はスライス単位に事前索引化する。これにより
-長い楽曲でも状態空間の指数的増加を避けるが、大域最適解は保証しない。
+The search is bounded to eight choices including a rest, a beam width of 24,
+and segments of approximately eight quarter-note units. Sustain lookup is
+pre-indexed by slice. These limits prevent exponential state growth on long
+scores but do not guarantee a globally optimal result.
 
-## 12. 設定可能な値
+## 12. Configurable values
 
-現在CLIで公開している調整値は次のとおり。
+The CLI currently exposes:
 
-| CLI | 値 | 既定 |
+| Commands | Option | Default |
 |---|---|---:|
 | `analyze`, `spans`, `assign` | `--confidence-threshold` | 0.65 |
 | `analyze`, `spans`, `assign`, `reduce`, `validate`, `arrange` | `--harmony-backend` | internal |
@@ -344,22 +367,28 @@ music21が長三和音、短三和音、増三和音、属七、長七、短七�
 | `validate` | `--max-retries` | 3 |
 | `arrange` | `--quiet` | false |
 
-コスト重み、音域、候補数、ビーム幅、フレーズ長はPython APIまたは実装上の
-既定値であり、設定ファイルや `arrange` のCLI引数としてはまだ公開していない。
+Cost weights, ranges, candidate count, beam width, and segment duration are
+available through Python APIs or implementation defaults. They are not yet
+exposed through a configuration file or `arrange` options.
 
-## 13. 現在の限界と次の課題
+## 13. Current limitations and next steps
 
-- 主旋律を第1パートの最初の声部と仮定しており、自動メロディー検出ではない
-- internalのコード推定は局所的で、調性、転調、借用和音の文脈理解が弱い
-- music21の調性窓は16四分音符固定で、転調境界や短いトニック化を粗く扱う
-- 区間境界は四分音符8個分・カデンツ・無音による近似で、原譜のスラー等を
-  使わない
-- 候補と経路の枝刈りで音楽的に良い経路を失う場合がある
-- 出力の16分音符量子化により細かなリズム情報を失う
-- 第2声の拍単位縮約は強く、音楽的な内声進行を消す場合がある
-- 重音、装飾音、演奏表現、レイアウト、歌詞を保持しない
-- 和声・旋律品質を正解付きデータや人間評価で定量化していない
+- Melody selection assumes the first source voice in the first part.
+- Internal chord estimation has weak contextual understanding of keys,
+  modulation, and borrowed harmony.
+- The music21 key window has a fixed sixteen-quarter-note duration, so it
+  handles modulation boundaries and brief tonicizations coarsely.
+- Segment boundaries use duration, cadence, and silence rather than source
+  slurs or phrase marks.
+- Candidate and path pruning can discard a musically preferable route.
+- Sixteenth-note output quantization loses fine rhythmic detail.
+- Beat-level second-voice reduction can erase meaningful inner motion.
+- The output does not preserve simultaneous notes, ornaments, expression,
+  layout, or lyrics.
+- Harmonic and melodic quality has not been evaluated against labeled data or
+  quantified human judgments.
 
-次の改善候補は、主旋律声部の明示指定、調性を含む和声モデル、原譜の
-フレーズ情報の利用、楽器プロファイル、ビーム幅と重みのCLI設定、
-演奏表現のコピー、MusicXMLラウンドトリップ試験の拡充である。
+Potential next steps include explicit melody-source selection, a more
+contextual harmony model, source phrase-mark support, selectable instrument
+profiles, CLI controls for beam width and weights, expression copying, and
+broader MusicXML round-trip tests.

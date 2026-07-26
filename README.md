@@ -1,35 +1,38 @@
 # miduo
 
-[English](README.en.md)
+[日本語](README.ja.md)
 
-MusicXML / MuseScore楽譜を、2本の単旋律声部へ自動編曲するPython CLIである。
-主旋律を第1声に残し、原曲の伴奏から和声の骨格を表す第2声の旋律線を
-選ぶ。
+miduo is a Python CLI that automatically reduces MusicXML and MuseScore scores
+to two monophonic voices. It preserves the melody in the first voice and selects
+a second melodic line that represents the harmonic backbone of the original
+accompaniment.
 
-編曲アルゴリズムは汎用2声を志向しているが、現行実装の音域と出力楽器設定は
-ヴァイオリン向けである。第1声をG3–E7、第2声をG3–A6に制限し、出力パートの
-楽器メタデータもヴァイオリンとして書き出す。これらは将来、選択可能な
-声部別の楽器プロファイルへ拡張する想定である。
+The arrangement architecture is intended to be general-purpose, but the
+current range constraints and output instrument metadata are violin-specific.
+The first voice is limited to G3–E7, the second to G3–A6, and both output parts
+are identified as violins. A future instrument-profile system is expected to
+make profiles selectable independently for each voice.
 
-対応する入出力形式は `.musicxml`、`.xml`、`.mxl`、`.mscz` である。
-MSCZの読み書きにはMuseScoreのCLIを使用する。
+Supported input and output formats are `.musicxml`, `.xml`, `.mxl`, and `.mscz`.
+Reading or writing MSCZ requires the MuseScore CLI.
 
-## 必要環境
+## Requirements
 
-- Python 3.11以上
+- Python 3.11 or later
 - [uv](https://docs.astral.sh/uv/)
-- MuseScore 3または4（MSCZを扱う場合のみ）
+- MuseScore 3 or 4 when working with MSCZ
 
-依存環境を準備し、CLIを確認する。
+Prepare the environment and check the CLI:
 
 ```console
 uv sync
 uv run miduo --help
 ```
 
-`uv.lock` は再現可能な開発・CI環境のためリポジトリへコミットする。
+Commit `uv.lock` to the repository to keep development and CI environments
+reproducible.
 
-## 編曲する
+## Arrange a score
 
 ```console
 uv run miduo arrange input.musicxml -o duet.musicxml
@@ -38,22 +41,23 @@ uv run miduo arrange input.mscz -o duet-music21.mscz \
   --harmony-backend music21
 ```
 
-和声解析は高速な `internal`（既定）と、局所調性・ローマ数字を扱う
-`music21` の2方式から選べる。同じ曲を両方で生成し、聴き比べることを
-推奨する。
+Two harmony backends are available: the fast `internal` backend, which is the
+default, and the `music21` backend, which adds local-key and Roman-numeral
+analysis. Generating both versions of a score and comparing them by ear is
+recommended.
 
-`arrange` は次の処理を順に実行する。
+`arrange` runs the following stages:
 
-1. MusicXMLの解析
-2. 和声スライスとコードの推定
-3. 持続音・掛留音・ペダル音の検出
-4. 2声への割当
-5. 第2声のリズム簡略化
-6. 音域・単声性・声部交差の検証
-7. MusicXML / MXL / MSCZの書き出し
+1. Parse MusicXML
+2. Build harmonic slices and estimate chords
+3. Detect sustained notes, suspensions, and pedal tones
+4. Assign material to two voices
+5. Simplify the second-voice rhythm
+6. Validate range, monophony, and voice crossing
+7. Write MusicXML, MXL, or MSCZ
 
-長い曲でも停止と誤解しにくいよう、処理段階と声部割当中の小節進捗を
-標準エラーへ逐次表示する。
+For long scores, progress is written to standard error, including the current
+stage and measure during voice assignment:
 
 ```text
 [parse] 400 measures, 3870 note events
@@ -63,30 +67,30 @@ uv run miduo arrange input.mscz -o duet-music21.mscz \
 [validate] valid, 0 retries
 ```
 
-進捗表示を止めるには `--quiet`、出力せず全パイプラインを確認するには
-`--dry-run` を指定する。
+Use `--quiet` to suppress progress or `--dry-run` to run the complete pipeline
+without writing the output:
 
 ```console
 uv run miduo arrange input.mscz -o duet.mscz --quiet
 uv run miduo arrange input.mscz -o duet.musicxml --dry-run
 ```
 
-MuseScoreを自動検出できない場合は実行ファイルを指定できる。
+If MuseScore cannot be detected automatically, specify its executable:
 
 ```console
 uv run miduo arrange input.mscz -o duet.mscz \
   --musescore "/Applications/MuseScore 4.app/Contents/MacOS/mscore"
 ```
 
-パッケージをインストールせずに実行する場合:
+To run without installing the package:
 
 ```console
 PYTHONPATH=src python -m miduo --help
 ```
 
-## 中間結果を調べる
+## Inspect intermediate results
 
-各段階を個別に実行でき、多くのコマンドは `--json` に対応する。
+Each pipeline stage can be run independently. Most commands support `--json`.
 
 ```console
 uv run miduo inspect input.mscz
@@ -100,45 +104,56 @@ uv run miduo reduce input.musicxml --json
 uv run miduo validate input.musicxml --json
 ```
 
-`analyze` と `spans` / `assign` では `--confidence-threshold`、
-`reduce` では `--attack-threshold`、`validate` では `--max-retries`
-を調整できる。
+`analyze`, `spans`, and `assign` accept `--confidence-threshold`; `reduce`
+accepts `--attack-threshold`; and `validate` accepts `--max-retries`.
 
-## 2声への圧縮方法
+## How the two-voice reduction works
 
-原曲を音の開始・終了位置で短い和声スライスに分割する。第1声には
-第1パートの第1声部を主旋律として割り当て、第2声には伴奏音とその
-オクターブ移動から候補を作る。現在は第1声をG3–E7、第2声をG3–A6に
-制限する。
+The source is divided into short harmonic slices at every note onset and
+release. The first voice takes the first source voice in the first part as its
+melody. Candidates for the second voice come from accompaniment notes and
+their octave transpositions. The current ranges are G3–E7 for the first voice
+and G3–A6 for the second.
 
-`internal` バックエンドは独自のコードテンプレート照合である。長三和音、
-短三和音、増三和音、属七、長七、短七、減七、半減七を推定し、低信頼区間は
-直前の確信度が高いコードで補間する。
+The `internal` backend matches pitch-class sets against built-in chord
+templates. It recognizes major, minor, augmented, dominant-seventh,
+major-seventh, minor-seventh, diminished-seventh, and half-diminished-seventh
+chords. Low-confidence slices inherit the most recent confident chord.
 
-`music21` バックエンドは同じスライスをmusic21へ渡し、16四分音符ごとの
-局所調性、コードルート、ローマ数字を推定する。記譜上の調号も補助情報に
-使い、V–Iおよび二次的ドミナントの解決をカデンツとして扱う。music21が
-明確なコード種別を返せない区間では、内部推定器へフォールバックする。
+The `music21` backend sends the same slices to music21 and estimates a local
+key, chord root, and Roman numeral for each sixteen-quarter-note context. The
+notated key signature is used as supporting evidence. Dominant-to-tonic
+resolutions and resolved secondary dominants are treated as cadences. When
+music21 cannot identify a supported chord quality, the analyzer falls back to
+the internal result.
 
-第2声は、和声情報の欠落、音域外、跳躍、声部交差、声部間隔、持続音の
-切断、弱拍での過剰な動きなどをコスト化して選ぶ。カデンツ、無音、
-または四分音符8個分を境界とする区間ごとに、休符を含む候補を最大8選択肢、
-経路を最大24本へ絞る状態マージ付きビームサーチである。
+The second voice is selected by assigning costs to lost harmonic information,
+range violations, leaps, voice crossing, spacing, broken sustains, and
+unnecessary weak-beat motion. Each search segment ends at a cadence, a silence,
+or approximately eight quarter-note units. At every slice, the search retains
+at most eight choices including a rest, merges paths that reach the same state,
+and keeps the best 24 paths.
 
-詳細は [DESIGN.md](DESIGN.md) を参照する。
+See [DESIGN.md](DESIGN.md) for details.
 
-## 現在の制約
+## Current limitations
 
-- 編曲パーサは `score-partwise` MusicXMLを対象とする
-- 主旋律は第1パートの最初の声部と仮定する
-- 出力は各声部1音のみで、同一声部内の重音には対応しない
-- グレースノート、強弱、アーティキュレーション、歌詞などは出力へ引き継がない
-- 出力音価は可読性とMuseScore互換性のため16分音符グリッドへ量子化する
-- コード推定は局所的なピッチ集合に基づき、調性・転調・機能和声を大域解析しない
-- music21の局所調性は16四分音符単位の近似で、転調位置を厳密には求めない
-- 原曲にない対旋律を新しく作曲するのではなく、原曲音から骨格を選択する
+- The arrangement parser requires `score-partwise` MusicXML.
+- The first source voice in the first part is assumed to be the melody.
+- Each output voice is monophonic; simultaneous notes within one voice are not
+  supported.
+- Grace notes, dynamics, articulations, lyrics, and similar notation are not
+  copied to the output.
+- Output timing is quantized to a sixteenth-note grid for readability and
+  MuseScore compatibility.
+- The internal chord analyzer does not model key, modulation, or harmonic
+  function globally.
+- The music21 local-key window spans sixteen quarter-note units and does not
+  locate modulation boundaries precisely.
+- The system selects a structural line from source notes; it does not compose
+  a new countermelody.
 
-## テスト
+## Tests
 
 ```console
 uv run pytest
